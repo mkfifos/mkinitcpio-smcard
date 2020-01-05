@@ -1,0 +1,87 @@
+#!/usr/bin/ash
+# to be placed in /lib/initcpio/hooks/
+# and renamed to smcard
+
+run_hook() {
+
+# add dm-crypt LKM to the kernel
+    modprobe -a -q dm-crypt >/dev/null 2>&1
+    [ "${quiet}" = "y" ] && CSQUIET=">/dev/null"
+
+# get device if specified
+    if [ -n "${cryptdevice}" ]; then
+        DEPRECATED_CRYPT=0
+        IFS=: read cryptdev cryptname cryptoptions <<EOF
+$cryptdevice
+EOF
+    else
+        DEPRECATED_CRYPT=1
+        cryptdev="${root}"
+        cryptname="cryptroot"
+    fi
+
+# get keyfile if specified
+    if [ -n "$cryptkey" ]; then
+        IFS=: read ckdev ckarg1 ckarg2 <<EOF
+$cryptkey
+EOF
+    else
+        ckdev="rootfs"
+        ckarg1="/etc/keys/cryptkey.gpg"
+    fi
+
+# get cryptoptions if specified
+    for cryptopt in ${cryptoptions//,/ }; do
+        case ${cryptopt} in
+            allow-discards)
+                cryptargs="${cryptargs} --allow-discards"
+                ;;
+            *)
+                echo "Encryption option '${cryptopt}' not known, ignoring." >&2
+                ;;
+        esac
+    done
+
+# check if deprecated syntax is used
+    warn_deprecated() {
+        echo "The syntax 'root=${root}' where '${root}' is an encrypted volume is deprecated"
+        echo "Use 'root=/dev/mapper/cryptroot cryptdevice=${root}:cryptroot' instead."
+    }
+
+# get path of keyfile
+    if [ "$ckdev" = "rootfs" ]; then
+            ckeyfile=$ckarg1
+    fi
+
+# check if device is already unlocked and mapped
+# check if cryptkey is gpg file
+# check if gpg1 is available
+    if [ -b "/dev/mapper/${cryptname}" ]; then
+        echo "Device ${cryptname} already exists - aborting"
+        return 0
+    fi
+    if [ "${ckarg1#*.}" != "gpg" ]; then
+        echo "Need a gpg file to proceed - aborting" >&2
+        return 0
+    fi
+    if ! [ -x /usr/bin/gpg1 ]; then
+        echo "Need /usr/bin/gpg1 to proceed - aborting" >&2
+        return 0
+    fi
+
+# unlock and mount the cryptdevice
+# start pcscd
+    echo ":: start pcscd"
+    /usr/bin/pcscd --auto-exit &
+    sleep 1
+# fix tty for gpg1
+    if [ -e /dev/tty ]; then mv /dev/tty /dev/tty.backup ; fi
+    cp -a /dev/console /dev/tty
+# run gpg1
+    echo ":: try to unlock cryptroot with smartcard"
+    /usr/bin/gpg1 --homedir "$(dirname $ckeyfile)" --trustdb-name /dev/null --decrypt "$ckeyfile" | cryptsetup --key-file=- luksOpen ${cryptdev} ${cryptname}
+# undo tty fix
+    if [ -e /dev/tty.backup ]; then mv /dev/tty.backup /dev/tty ; fi
+# stop pcscd
+    killall pcscd
+}
